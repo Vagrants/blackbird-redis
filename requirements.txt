@@ -1,0 +1,2 @@
+-e git@github.com:Vagrants/blackbird.git#egg=blackbird
+python-redis
