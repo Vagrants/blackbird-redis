@@ -41,7 +41,7 @@ class ConcreteJob(base.JobBase):
             self.logger.warn(
                 'connect failed. {0}'.format(err)
             )
-            sys.exit(0)
+            return 1
 
         # get stats by INFO
         self._get_stats(redis)
@@ -56,7 +56,6 @@ class ConcreteJob(base.JobBase):
         # bye :-)
         redis.close()
 
-        sys.exit(0)
 
     def _get_stats(self, redis):
         """
