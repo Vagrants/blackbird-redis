@@ -1,0 +1,3 @@
+include redis.py
+include redis.cfg
+include PROJECT.txt
