@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-u"""
+"""
 Send INFO and CONFIG GET to ZabbixServer.
 """
 
@@ -8,6 +8,7 @@ import re
 import json
 import sys
 import socket
+from datetime import datetime
 from telnetlib import Telnet
 from blackbird.plugins import base
 
@@ -21,7 +22,7 @@ class ConcreteJob(base.JobBase):
     def __init__(self, options, queue=None, logger=None):
         super(ConcreteJob, self).__init__(options, queue, logger)
 
-    def insert_queue(self, item):
+    def _enqueue(self, item):
         self.queue.put(item, block=False)
         self.logger.debug(
             'Inserted to queue redis.stat[{key}]:{value}'
@@ -29,9 +30,6 @@ class ConcreteJob(base.JobBase):
         )
 
     def looped_method(self):
-        """
-        Get stats data of redis by using telnet.
-        """
 
         try:
             redis = RedisClient(host=self.options['host'],
@@ -45,12 +43,31 @@ class ConcreteJob(base.JobBase):
             )
             sys.exit(0)
 
+        # get stats by INFO
+        self._get_stats(redis)
+
+        # get response time by SET
+        self._response_set(redis)
+
+        # get response time by GET
+        self._response_get(redis)
+
+        # bye :-)
+        redis.close()
+
+        sys.exit(0)
+
+    def _get_stats(self, redis):
+        """
+        Get stats data of redis by using telnet.
+        """
+
         ignore = re.compile(r'^#')
         dbmatch = re.compile(r'^db\d+')
         lld_db = []
         # get INFO
         for line in redis.execute('INFO').split('\r\n'):
-            if line == '' or re.match(ignore,line):
+            if line == '' or re.match(ignore, line):
                 continue
 
             [key, value] = line.split(':')
@@ -66,7 +83,7 @@ class ConcreteJob(base.JobBase):
                         value=lld_value,
                         host=self.options['hostname']
                     )
-                    self.insert_queue(item)
+                    self._enqueue(item)
                 continue
             # discovery end
 
@@ -76,7 +93,7 @@ class ConcreteJob(base.JobBase):
                 host=self.options['hostname']
             )
 
-            self.insert_queue(item)
+            self._enqueue(item)
 
         # discovery key
         item = RedisDiscoveryItem(
@@ -84,20 +101,38 @@ class ConcreteJob(base.JobBase):
             value=lld_db,
             host=self.options['hostname']
         )
-        self.insert_queue(item)
+        self._enqueue(item)
 
         # get CONFIG GET
-        for cg in ['maxmemory', 'maxclients']:
-            value = redis.execute('CONFIG', 'GET', cg)
+        for config_get in ['maxmemory', 'maxclients']:
+            value = redis.execute('CONFIG', 'GET', config_get)
             item = RedisItem(
-                key=cg,
+                key=config_get,
                 value=value[1],
                 host=self.options['hostname']
             )
-            self.insert_queue(item)
+            self._enqueue(item)
 
-        redis.close()
-        sys.exit(0)
+    def _response_set(self, redis):
+        dummy_value = datetime.now().strftime('%Y%m%d%H%M%S')
+        with base.Timer() as timer:
+            redis.execute('SET', '__zabbix_check', dummy_value)
+        item = RedisItem(
+            key='set_response',
+            value=timer.sec,
+            host=self.options['hostname']
+        )
+        self._enqueue(item)
+
+    def _response_get(self, redis):
+        with base.Timer() as timer:
+            redis.execute('GET', '__zabbix_check')
+        item = RedisItem(
+            key='get_response',
+            value=timer.sec,
+            host=self.options['hostname']
+        )
+        self._enqueue(item)
 
 
 class RedisClient:
