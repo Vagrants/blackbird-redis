@@ -46,11 +46,12 @@ class ConcreteJob(base.JobBase):
         # get stats by INFO
         self._get_stats(redis)
 
-        # get response time by SET
-        self._response_set(redis)
+        if 'response_check_key' in self.options:
+            # get response time by SET
+            self._response_set(redis)
 
-        # get response time by GET
-        self._response_get(redis)
+            # get response time by GET
+            self._response_get(redis)
 
         # bye :-)
         redis.close()
