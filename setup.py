@@ -13,7 +13,7 @@ def read(fname):
 
 setup(
     name='blackbird-redis',
-    version='0.1.0',
+    version='0.1.1',
     description=(
         'Get monitorring stats of redis for blackbird '
     ),

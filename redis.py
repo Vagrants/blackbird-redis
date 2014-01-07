@@ -15,8 +15,9 @@ from blackbird.plugins import base
 
 class ConcreteJob(base.JobBase):
     """
-    This Class is called by "Executer"
-    ConcreteJob is registerd as a job of Executer.
+    This Class is called by "Executor"
+    Get redis's info,
+    and send to specified zabbix server.
     """
 
     def __init__(self, options, queue=None, logger=None):
@@ -29,8 +30,7 @@ class ConcreteJob(base.JobBase):
             ''.format(key=item.key, value=item.value)
         )
 
-    def looped_method(self):
-
+    def _connect(self):
         try:
             redis = RedisClient(host=self.options['host'],
                                 port=self.options['port'],
@@ -38,10 +38,18 @@ class ConcreteJob(base.JobBase):
                                 timeout=self.options['timeout'],
                                 auth=self.options['auth'])
         except RuntimeError as err:
-            self.logger.warn(
+            raise base.BlackbirdPluginError(
                 'connect failed. {0}'.format(err)
             )
-            return 1
+
+        return redis
+
+    def build_items(self):
+        """
+        main loop
+        """
+
+        redis = self._connect()
 
         # get stats by INFO
         self._get_stats(redis)
@@ -56,6 +64,18 @@ class ConcreteJob(base.JobBase):
         # bye :-)
         redis.close()
 
+    def build_discovery_items(self):
+        """
+        main loop for lld
+        """
+
+        redis = self._connect()
+
+        # get dbname for lld
+        self._get_lld_stats(redis)
+
+        # bye :-)
+        redis.close()
 
     def _get_stats(self, redis):
         """
@@ -65,6 +85,7 @@ class ConcreteJob(base.JobBase):
         ignore = re.compile(r'^#')
         dbmatch = re.compile(r'^db\d+')
         lld_db = []
+
         # get INFO
         for line in redis.execute('INFO').split('\r\n'):
             if line == '' or re.match(ignore, line):
@@ -72,20 +93,17 @@ class ConcreteJob(base.JobBase):
 
             [key, value] = line.split(':')
 
-            # discovery
-            # dbN:keys=N,expires=N,avg_ttl=N
+            # db stats
             if re.match(dbmatch, key):
-                lld_db.append(key)
-                for lld_keys in value.split(','):
-                    [lld_key, lld_value] = lld_keys.split('=')
+                for db_keys in value.split(','):
+                    [db_key, db_value] = db_keys.split('=')
                     item = RedisItem(
-                        key="db,{0},{1}".format(key, lld_key),
-                        value=lld_value,
+                        key="db,{0},{1}".format(key, db_key),
+                        value=db_value,
                         host=self.options['hostname']
                     )
                     self._enqueue(item)
                 continue
-            # discovery end
 
             item = RedisItem(
                 key=key,
@@ -95,20 +113,37 @@ class ConcreteJob(base.JobBase):
 
             self._enqueue(item)
 
-        # discovery key
-        item = RedisDiscoveryItem(
-            key='db.LLD',
-            value=lld_db,
-            host=self.options['hostname']
-        )
-        self._enqueue(item)
-
         # get CONFIG GET
         for config_get in ['maxmemory', 'maxclients']:
             value = redis.execute('CONFIG', 'GET', config_get)
             item = RedisItem(
                 key=config_get,
                 value=value[1],
+                host=self.options['hostname']
+            )
+            self._enqueue(item)
+
+    def _get_lld_stats(self, redis):
+        """
+        Get lld stats data of redis by using telnet.
+        """
+
+        lld_db = []
+
+        # discovery
+        # dbN:keys=N,expires=N,avg_ttl=N
+        dbmatch = re.compile(r'^(db\d+):')
+
+        # get dbN
+        for line in redis.execute('INFO').split('\r\n'):
+            if re.match(dbmatch, line):
+                [key, value] = line.split(':')
+                lld_db.append(key)
+
+        if len(lld_db) > 0:
+            item = base.DiscoveryItem(
+                key='redis.db.LLD',
+                value=[{'{#DB}': dbname} for dbname in lld_db],
                 host=self.options['hostname']
             )
             self._enqueue(item)
@@ -235,41 +270,6 @@ class RedisItem(base.ItemBase):
         self.__data['clock'] = self.clock
 
 
-class RedisDiscoveryItem(base.ItemBase):
-    """
-    Enqueued item.
-    Take key(used by zabbix) and value as argument.
-    """
-
-    def __init__(self, key, value, host):
-        super(RedisDiscoveryItem, self).__init__(key, value, host)
-
-        self.__data = {}
-        self._generate()
-
-    @property
-    def data(self):
-        """Dequeued data."""
-
-        return self.__data
-
-    def _generate(self):
-        """
-        Convert to the following format:
-        RedisItem(key='uptime', value='65535')
-        {host:host, key:key1, value:value1, clock:clock}
-        """
-
-        self.__data['key'] = 'redis.stat.{0}'.format(self.key)
-        self.__data['host'] = self.host
-        self.__data['clock'] = self.clock
-
-        value = {
-            'data': [{'{#DB}': v} for v in self.value]
-        }
-        self.__data['value'] = json.dumps(value)
-
-
 class Validator(base.ValidatorBase):
     """
     This class store information
@@ -287,6 +287,6 @@ class Validator(base.ValidatorBase):
             "port = integer(0, 65535, default=6379)",
             "db = integer(0, 65535, default=0)",
             "timeout = integer(default=10)",
-            "hostname = string(default={0})".format(self.gethostname()),
+            "hostname = string(default={0})".format(self.detect_hostname()),
         )
         return self.__spec
