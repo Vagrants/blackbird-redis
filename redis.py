@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+# pylint: disable=too-many-arguments,missing-docstring,too-few-public-methods
 """
 Send INFO and CONFIG GET to ZabbixServer.
 """
 
 import re
-import json
-import sys
 import socket
 from datetime import datetime
 from telnetlib import Telnet
@@ -84,7 +83,6 @@ class ConcreteJob(base.JobBase):
 
         ignore = re.compile(r'^#')
         dbmatch = re.compile(r'^db\d+')
-        lld_db = []
 
         # get INFO
         for line in redis.execute('INFO').split('\r\n'):
@@ -137,7 +135,7 @@ class ConcreteJob(base.JobBase):
         # get dbN
         for line in redis.execute('INFO').split('\r\n'):
             if re.match(dbmatch, line):
-                [key, value] = line.split(':')
+                key, _ = line.split(':')
                 lld_db.append(key)
 
         if len(lld_db) > 0:
@@ -170,26 +168,28 @@ class ConcreteJob(base.JobBase):
         self._enqueue(item)
 
 
-class RedisClient:
+class RedisClient(object):
     """
     redis client library
     """
- 
+
     def __init__(self, host, port, db, timeout, auth):
         try:
             self._connection = Telnet(host, port, timeout)
-        except socket.error: 
-            raise RuntimeError('Could not connect {host}:{port}'
-                               ''.format(host=host,port=port))
+        except socket.error:
+            raise base.BlackbirdPluginError(
+                'Could not connect {host}:{port}'
+                ''.format(host=host, port=port)
+            )
 
         self._timeout = timeout
-        if auth != 'None':
+        if auth != '':
             if self.execute('AUTH', auth) != 'OK':
-                raise RuntimeError('Could not AUTH')
+                raise base.BlackbirdPluginError('Could not AUTH')
         if db:
             if self.execute('SELECT', db) != 'OK':
-                raise RuntimeError('Could not select db %d' % db)
- 
+                raise base.BlackbirdPluginError('Could not select db %d' % db)
+
     def execute(self, *request):
         self._sendline('*%d' % len(request))
         for arg in request:
@@ -197,7 +197,7 @@ class RedisClient:
             self._sendline('$%d' % len(as_string))
             self._sendline(as_string)
         return self.read_command()
- 
+
     def read_command(self):
         line = self._readline()
         prefix = line[0]
@@ -205,7 +205,7 @@ class RedisClient:
         if prefix == '+':
             return rest
         elif prefix == '-':
-            raise RuntimeError('Redis error: %s' % rest)
+            raise base.BlackbirdPluginError('Redis error: %s' % rest)
         elif prefix == ':':
             return int(rest)
         elif prefix == '$':
@@ -223,17 +223,19 @@ class RedisClient:
                 return data
         elif prefix == '*':
         # Recurse
-            return list([self.read_command() for c in range(int(rest))])
+            return list([self.read_command() for _ in range(int(rest))])
         else:
-            raise RuntimeError('Unknown response prefix "%s"' % prefix)
- 
+            raise base.BlackbirdPluginError(
+                'Unknown response prefix "%s"' % prefix
+            )
+
     def close(self):
         self._connection.close()
- 
+
     def _sendline(self, line):
         self._connection.write(line)
         self._connection.write('\r\n')
- 
+
     def _readline(self):
         line = self._connection.read_until('\r\n', self._timeout)[:-2]
         return line
@@ -283,9 +285,10 @@ class Validator(base.ValidatorBase):
     def spec(self):
         self.__spec = (
             "[{0}]".format(__name__),
-            "host = ipaddress(default='127.0.0.1')",
+            "host = string(default='127.0.0.1')",
             "port = integer(0, 65535, default=6379)",
-            "db = integer(0, 65535, default=0)",
+            "db = integer(0, 15, default=0)",
+            "auth = string(default='')",
             "timeout = integer(default=10)",
             "hostname = string(default={0})".format(self.detect_hostname()),
         )
