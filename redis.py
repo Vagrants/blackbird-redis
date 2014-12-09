@@ -5,6 +5,8 @@
 Send INFO and CONFIG GET to ZabbixServer.
 """
 
+__VERSION__ = '0.1.2'
+
 import re
 import socket
 from datetime import datetime
@@ -22,31 +24,13 @@ class ConcreteJob(base.JobBase):
     def __init__(self, options, queue=None, logger=None):
         super(ConcreteJob, self).__init__(options, queue, logger)
 
-    def _enqueue(self, item):
-        self.queue.put(item, block=False)
-        self.logger.debug(
-            'Inserted to queue redis.stat[{key}]:{value}'
-            ''.format(key=item.key, value=item.value)
-        )
-
-    def _connect(self):
-        try:
-            redis = RedisClient(host=self.options['host'],
-                                port=self.options['port'],
-                                db=self.options['db'],
-                                timeout=self.options['timeout'],
-                                auth=self.options['auth'])
-        except RuntimeError as err:
-            raise base.BlackbirdPluginError(
-                'connect failed. {0}'.format(err)
-            )
-
-        return redis
-
     def build_items(self):
         """
         main loop
         """
+
+        # ping item
+        self._ping()
 
         redis = self._connect()
 
@@ -76,6 +60,40 @@ class ConcreteJob(base.JobBase):
         # bye :-)
         redis.close()
 
+    def _enqueue(self, key, value):
+
+        item = RedisItem(
+            key=key,
+            value=value,
+            host=self.options['hostname']
+        )
+        self.queue.put(item, block=False)
+        self.logger.debug(
+            'Inserted to queue {key}:{value}'
+            ''.format(key=key, value=value)
+        )
+
+    def _connect(self):
+        try:
+            redis = RedisClient(host=self.options['host'],
+                                port=self.options['port'],
+                                db=self.options['db'],
+                                timeout=self.options['timeout'],
+                                auth=self.options['auth'])
+        except RuntimeError as err:
+            raise base.BlackbirdPluginError(
+                'connect failed. {0}'.format(err)
+            )
+
+        return redis
+
+    def _ping(self):
+        """
+        send ping item
+        """
+        self._enqueue('blackbird.redis.ping', 1)
+        self._enqueue('blackbird.redis.version', __VERSION__)
+
     def _get_stats(self, redis):
         """
         Get stats data of redis by using telnet.
@@ -89,37 +107,24 @@ class ConcreteJob(base.JobBase):
             if line == '' or re.match(ignore, line):
                 continue
 
-            [key, value] = line.split(':')
+            key, value = line.split(':')
 
-            # db stats
             if re.match(dbmatch, key):
+                # db stats
                 for db_keys in value.split(','):
-                    [db_key, db_value] = db_keys.split('=')
-                    item = RedisItem(
-                        key="db,{0},{1}".format(key, db_key),
-                        value=db_value,
-                        host=self.options['hostname']
+                    db_key, db_value = db_keys.split('=')
+                    self._enqueue(
+                        'redis.stat[db,{0},{1}]'.format(key, db_key),
+                        db_value
                     )
-                    self._enqueue(item)
-                continue
-
-            item = RedisItem(
-                key=key,
-                value=value,
-                host=self.options['hostname']
-            )
-
-            self._enqueue(item)
+            else:
+                # normal key value stats
+                self._enqueue('redis.stat[{key}]'.format(key=key), value)
 
         # get CONFIG GET
         for config_get in ['maxmemory', 'maxclients']:
-            value = redis.execute('CONFIG', 'GET', config_get)
-            item = RedisItem(
-                key=config_get,
-                value=value[1],
-                host=self.options['hostname']
-            )
-            self._enqueue(item)
+            value = redis.execute('CONFIG', 'GET', config_get)[1]
+            self._enqueue('redis.stat[{key}]'.format(key=config_get), value)
 
     def _get_lld_stats(self, redis):
         """
@@ -144,28 +149,18 @@ class ConcreteJob(base.JobBase):
                 value=[{'{#DB}': dbname} for dbname in lld_db],
                 host=self.options['hostname']
             )
-            self._enqueue(item)
+            self.queue.put(item, block=False)
 
     def _response_set(self, redis):
         dummy_value = datetime.now().strftime('%Y%m%d%H%M%S')
         with base.Timer() as timer:
             redis.execute('SET', '__zabbix_check', dummy_value)
-        item = RedisItem(
-            key='set_response',
-            value=timer.sec,
-            host=self.options['hostname']
-        )
-        self._enqueue(item)
+        self._enqueue('redis.stat[set_response]', timer.sec)
 
     def _response_get(self, redis):
         with base.Timer() as timer:
             redis.execute('GET', '__zabbix_check')
-        item = RedisItem(
-            key='get_response',
-            value=timer.sec,
-            host=self.options['hostname']
-        )
-        self._enqueue(item)
+        self._enqueue('redis.stat[get_response]', timer.sec)
 
 
 class RedisClient(object):
@@ -266,7 +261,7 @@ class RedisItem(base.ItemBase):
         {host:host, key:key1, value:value1, clock:clock}
         """
 
-        self.__data['key'] = 'redis.stat[{0}]'.format(self.key)
+        self.__data['key'] = self.key
         self.__data['value'] = self.value
         self.__data['host'] = self.host
         self.__data['clock'] = self.clock
